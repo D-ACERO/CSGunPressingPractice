@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RECOIL_PATTERNS } from "./recoil-patterns";
 
 type Category = "步枪" | "冲锋枪" | "手枪" | "重型" | "狙击枪";
 type Weapon = {
@@ -58,19 +59,24 @@ const WEAPONS: Weapon[] = [
 
 const CATEGORIES: Category[] = ["步枪", "冲锋枪", "手枪", "重型", "狙击枪"];
 type Hole = { x: number; y: number; age: number; pellet?: boolean };
-type Runtime = { viewX: number; viewY: number; recoilX: number; recoilY: number; shot: number; holes: Hole[]; firing: boolean; nextShot: number; lastFrame: number; recoveryAt: number; roundStart: number; mouseDistance: number };
+type Runtime = { aimX: number; aimY: number; punchX: number; punchY: number; shot: number; burst: number; holes: Hole[]; firing: boolean; nextShot: number; lastShot: number; lastFrame: number; recoveryAt: number; roundStart: number; mouseDistance: number; gunKick: number; gunRoll: number; muzzle: number };
 
 function noise(n: number, seed: number) {
   const x = Math.sin((n + 1) * 12.9898 + seed * 78.233) * 43758.5453;
   return (x - Math.floor(x)) * 2 - 1;
 }
 
-function recoilStep(weapon: Weapon, shot: number) {
-  const phase = shot / Math.max(1, weapon.ammo - 1);
-  const rise = weapon.kick * (shot < 3 ? .72 : shot < 10 ? 1.1 : .88);
-  const wave = Math.sin(shot * .58 + weapon.seed) * weapon.side;
-  const turn = Math.sin((phase * 2.6 + .15) * Math.PI) * weapon.curve;
-  return { x: wave * .56 + turn * .58 + noise(shot, weapon.seed) * .22, y: rise + noise(shot, weapon.seed + 11) * .09 };
+function recoilPoint(weapon: Weapon, shot: number, burst: number) {
+  const source = RECOIL_PATTERNS[weapon.id];
+  if (source?.length) {
+    const point = source[Math.min(shot, source.length - 1)];
+    return { x: point[0], y: Math.max(0, point[1]) };
+  }
+  const firstKick = weapon.kick * (weapon.scoped ? 12.5 : weapon.pellets ? 10 : 7.2);
+  return {
+    x: noise(burst, weapon.seed) * weapon.side * (2.2 + burst * .8),
+    y: firstKick * (1 + Math.min(burst, 4) * .42),
+  };
 }
 
 function WeaponSilhouette({ weapon }: { weapon: Weapon }) {
@@ -78,6 +84,7 @@ function WeaponSilhouette({ weapon }: { weapon: Weapon }) {
     <div className={`weapon-model shape-${weapon.shape}`} aria-hidden="true">
       <div className="gun-stock" /><div className="gun-body" /><div className="gun-barrel" />
       <div className="gun-mag" /><div className="gun-grip" /><div className="gun-scope" />
+      <div className="muzzle-flash" />
     </div>
   );
 }
@@ -100,7 +107,7 @@ export default function Home() {
   const arenaRef = useRef<HTMLDivElement>(null);
   const weaponRef = useRef(weapon);
   const settingsRef = useRef({ sensitivity, dpi, mYaw, spread, pattern, zoomed });
-  const runtime = useRef<Runtime>({ viewX: 0, viewY: 0, recoilX: 0, recoilY: 0, shot: 0, holes: [], firing: false, nextShot: 0, lastFrame: 0, recoveryAt: 0, roundStart: 0, mouseDistance: 0 });
+  const runtime = useRef<Runtime>({ aimX: 0, aimY: 0, punchX: 0, punchY: 0, shot: 0, burst: 0, holes: [], firing: false, nextShot: 0, lastShot: 0, lastFrame: 0, recoveryAt: 0, roundStart: 0, mouseDistance: 0, gunKick: 0, gunRoll: 0, muzzle: 0 });
 
   useEffect(() => { weaponRef.current = weapon; }, [weapon]);
   useEffect(() => { settingsRef.current = { sensitivity, dpi, mYaw, spread, pattern, zoomed }; }, [sensitivity, dpi, mYaw, spread, pattern, zoomed]);
@@ -117,8 +124,8 @@ export default function Home() {
 
   const reset = useCallback((refill = true) => {
     const r = runtime.current;
-    r.viewX = r.viewY = r.recoilX = r.recoilY = r.shot = r.mouseDistance = 0;
-    r.holes = []; r.firing = false; r.nextShot = 0; r.roundStart = performance.now();
+    r.aimX = r.aimY = r.punchX = r.punchY = r.shot = r.burst = r.mouseDistance = 0;
+    r.holes = []; r.firing = false; r.nextShot = r.lastShot = 0; r.gunKick = r.gunRoll = r.muzzle = 0; r.roundStart = performance.now();
     if (refill) setAmmo(weaponRef.current.ammo);
     setScore(null); setStatus("准备就绪 · 按住左键射击");
   }, []);
@@ -127,15 +134,19 @@ export default function Home() {
     const w = weaponRef.current;
     const r = runtime.current;
     if (r.shot >= w.ammo) { finishRound(); return false; }
-    const step = recoilStep(w, r.shot);
-    r.recoilX += step.x * 6.2;
-    r.recoilY += step.y * 7.2;
-    const scatter = settingsRef.current.spread ? (0.9 + r.shot * .055) : 0;
+    if (now - r.lastShot > 320) r.burst = 0;
+    const point = recoilPoint(w, r.burst, r.burst);
+    r.punchX = point.x;
+    r.punchY = point.y;
+    const scatter = settingsRef.current.spread ? (0.75 + r.shot * .045) : 0;
     const sx = noise(r.shot, w.seed + 211) * scatter;
     const sy = noise(r.shot, w.seed + 307) * scatter;
-    r.holes.push({ x: r.viewX + r.recoilX + sx, y: r.viewY + r.recoilY + sy, age: now });
-    if (w.pellets) for (let i = 1; i < w.pellets; i++) r.holes.push({ x: r.viewX + r.recoilX + noise(i + r.shot * 9, w.seed) * 16, y: r.viewY + r.recoilY + noise(i + r.shot * 7, w.seed + 4) * 13, age: now, pellet: true });
-    r.shot += 1; r.recoveryAt = now + 120;
+    r.holes.push({ x: r.aimX + r.punchX + sx, y: r.aimY + r.punchY + sy, age: now });
+    if (w.pellets) for (let i = 1; i < w.pellets; i++) r.holes.push({ x: r.aimX + r.punchX + noise(i + r.shot * 9, w.seed) * 16, y: r.aimY + r.punchY + noise(i + r.shot * 7, w.seed + 4) * 13, age: now, pellet: true });
+    r.shot += 1; r.burst += 1; r.lastShot = now; r.recoveryAt = now + 110;
+    r.gunKick = Math.min(1.35, r.gunKick + (w.category === "手枪" || w.scoped ? 1 : .68));
+    r.gunRoll = noise(r.shot, w.seed + 19) * (w.category === "冲锋枪" ? 1.3 : 2.4);
+    r.muzzle = 1;
     setAmmo(w.ammo - r.shot);
     if (r.shot >= w.ammo) setTimeout(finishRound, 160);
     return true;
@@ -155,16 +166,33 @@ export default function Home() {
       const r = runtime.current; const w = weaponRef.current;
       const dt = Math.min(32, now - (r.lastFrame || now)); r.lastFrame = now;
       if (r.firing && w.auto && now >= r.nextShot) { if (shoot(now)) r.nextShot = now + 60000 / w.rpm; }
-      if (!r.firing && now > r.recoveryAt) { const recovery = Math.pow(.86, dt / 16); r.recoilX *= recovery; r.recoilY *= recovery; }
+      if (!r.firing && now > r.recoveryAt) { const recovery = Math.pow(.78, dt / 16); r.punchX *= recovery; r.punchY *= recovery; if (Math.abs(r.punchY) < .05) { r.punchX = r.punchY = 0; r.burst = 0; } }
+      r.gunKick *= Math.pow(.7, dt / 16); r.gunRoll *= Math.pow(.68, dt / 16); r.muzzle *= Math.pow(.35, dt / 16);
       ctx.clearRect(0, 0, rect.width, rect.height);
       const cx = rect.width / 2, cy = rect.height / 2;
       const scale = settingsRef.current.zoomed ? 1.65 : 1;
-      const screen = (h: Hole) => ({ x: cx + (h.x - r.viewX) * scale, y: cy - (h.y - r.viewY) * scale });
+      const cameraX = r.aimX + r.punchX * .43 + noise(r.shot, w.seed + 401) * r.gunKick * .8;
+      const cameraY = r.aimY + r.punchY * .43 + r.gunKick * .7;
+      const screen = (h: Hole) => ({ x: cx + (h.x - cameraX) * scale, y: cy - (h.y - cameraY) * scale });
+      if (arenaRef.current) {
+        arenaRef.current.style.setProperty("--camera-x", `${-cameraX * scale}px`);
+        arenaRef.current.style.setProperty("--camera-y", `${cameraY * scale}px`);
+        arenaRef.current.style.setProperty("--vm-kick", `${r.gunKick}`);
+        arenaRef.current.style.setProperty("--vm-kick-x", `${r.gunKick * -18}px`);
+        arenaRef.current.style.setProperty("--vm-kick-y", `${r.gunKick * 14}px`);
+        arenaRef.current.style.setProperty("--vm-roll", `${r.gunRoll}deg`);
+        arenaRef.current.style.setProperty("--muzzle", `${r.muzzle}`);
+      }
       if (settingsRef.current.pattern) {
-        ctx.save(); ctx.globalAlpha = .32; ctx.setLineDash([4, 8]); ctx.strokeStyle = "#efb23c"; ctx.lineWidth = 1;
-        ctx.beginPath(); let gx = 0, gy = 0;
-        for (let i = 0; i < w.ammo; i++) { const s = recoilStep(w, i); gx += s.x * 6.2; gy += s.y * 7.2; const x = cx + gx * scale, y = cy - gy * scale; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
-        ctx.stroke(); ctx.restore();
+        const source = RECOIL_PATTERNS[w.id];
+        if (source?.length) {
+          ctx.save(); ctx.globalAlpha = .5; ctx.setLineDash([3, 7]); ctx.strokeStyle = "#d86c24"; ctx.fillStyle = "#d86c24"; ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          source.forEach((point, i) => { const x = cx + (-point[0] - cameraX) * scale; const y = cy - (-point[1] - cameraY) * scale; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+          ctx.stroke();
+          source.forEach((point, i) => { if (i % 3) return; const x = cx + (-point[0] - cameraX) * scale; const y = cy - (-point[1] - cameraY) * scale; ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill(); });
+          ctx.restore();
+        }
       }
       r.holes.forEach((h, i) => { const p = screen(h); if (p.x < -20 || p.x > rect.width + 20 || p.y < -20 || p.y > rect.height + 20) return; ctx.beginPath(); ctx.arc(p.x, p.y, h.pellet ? 2.2 : 4.1, 0, Math.PI * 2); ctx.fillStyle = h.pellet ? "rgba(22,20,17,.7)" : "#171511"; ctx.fill(); if (!h.pellet) { ctx.beginPath(); ctx.arc(p.x, p.y, 7 + (i % 3), 0, Math.PI * 2); ctx.strokeStyle = "rgba(59,48,35,.28)"; ctx.lineWidth = 1; ctx.stroke(); } });
       raf = requestAnimationFrame(draw);
@@ -174,10 +202,11 @@ export default function Home() {
 
   useEffect(() => {
     const onLock = () => { const isLocked = document.pointerLockElement === arenaRef.current; setLocked(isLocked); if (!isLocked) runtime.current.firing = false; };
-    const onMove = (e: MouseEvent) => { if (document.pointerLockElement !== arenaRef.current) return; const factor = settingsRef.current.sensitivity * (settingsRef.current.mYaw / .022) * .58; runtime.current.viewX += e.movementX * factor; runtime.current.viewY -= e.movementY * factor; runtime.current.mouseDistance += Math.hypot(e.movementX, e.movementY); };
+    const onMove = (e: MouseEvent) => { if (document.pointerLockElement !== arenaRef.current) return; const factor = settingsRef.current.sensitivity * (settingsRef.current.mYaw / .022) * .32; runtime.current.aimX += e.movementX * factor; runtime.current.aimY -= e.movementY * factor; runtime.current.mouseDistance += Math.hypot(e.movementX, e.movementY); };
+    const onMouseUp = () => { runtime.current.firing = false; };
     const onKey = (e: KeyboardEvent) => { if (e.code === "KeyR") { setStatus("换弹中…"); setTimeout(() => reset(true), 620); } if (e.code === "KeyE") reset(true); };
-    document.addEventListener("pointerlockchange", onLock); document.addEventListener("mousemove", onMove); document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("pointerlockchange", onLock); document.removeEventListener("mousemove", onMove); document.removeEventListener("keydown", onKey); };
+    document.addEventListener("pointerlockchange", onLock); document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onMouseUp); document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerlockchange", onLock); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onMouseUp); document.removeEventListener("keydown", onKey); };
   }, [reset]);
 
   const enter = () => { arenaRef.current?.requestPointerLock(); setStatus("准备就绪 · 按住左键射击"); };
